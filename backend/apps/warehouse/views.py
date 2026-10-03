@@ -10,13 +10,21 @@ from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from apps.core.response import success_response, error_response
-from .models import Unit, Category, Variety, Goods, StockIn, StockOut, Warning, Approval
+from .models import (
+    Unit, Category, Variety, Goods, StockIn, StockOut, Warning, Approval,
+    CustodyGoods, CustodyStatusLog, NotificationOutbox,
+)
 from .serializers import (
     UnitSerializer, UnitCreateSerializer,
     CategorySerializer, CategoryCreateSerializer,
     VarietySerializer, VarietyCreateSerializer,
     GoodsSerializer, StockInSerializer, StockOutSerializer,
-    WarningSerializer, ApprovalSerializer
+    WarningSerializer, ApprovalSerializer,
+    CustodyGoodsSerializer, CustodyGoodsCreateSerializer,
+    CustodyTransitionSerializer, NotificationOutboxSerializer,
+)
+from .notifications.outbox import (
+    TransitionError, change_custody_status, custody_dedup_key,
 )
 
 logger = logging.getLogger('apps')
@@ -636,3 +644,150 @@ class ApprovalListView(APIView):
             'page': 1,
             'page_size': 10
         })
+
+
+# ==================== 监管物资状态与通知投递箱 ====================
+
+class CustodyGoodsListView(APIView):
+    """监管物资登记/列表"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        queryset = CustodyGoods.objects.all().order_by('-created_at')
+
+        status_filter = request.query_params.get('status')
+        if status_filter:
+            queryset = queryset.filter(status=status_filter)
+
+        page = int(request.query_params.get('page', 1))
+        page_size = int(request.query_params.get('page_size', 10))
+        start = (page - 1) * page_size
+        end = start + page_size
+
+        total = queryset.count()
+        items = queryset[start:end]
+        return success_response(data={
+            'list': CustodyGoodsSerializer(items, many=True).data,
+            'total': total,
+            'page': page,
+            'page_size': page_size,
+        })
+
+    def post(self, request):
+        """登记监管物资，初始状态为冻结。"""
+        serializer = CustodyGoodsCreateSerializer(data=request.data)
+        if not serializer.is_valid():
+            first_error = list(serializer.errors.values())[0][0]
+            return error_response(message=str(first_error))
+
+        goods = CustodyGoods.objects.create(
+            name=serializer.validated_data['name'],
+            code=serializer.validated_data['code'],
+            registered_by=request.user,
+            status=CustodyGoods.STATUS_FROZEN,
+        )
+        logger.info("User %s registered custody goods %s", request.user.username, goods.code)
+        return success_response(data=CustodyGoodsSerializer(goods).data, message='登记成功')
+
+
+class CustodyStatusTransitionView(APIView):
+    """冻结、驳回或放行：业务变更与通知投递箱在同一事务提交。"""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        try:
+            goods = CustodyGoods.objects.get(pk=pk)
+        except CustodyGoods.DoesNotExist:
+            return error_response(message='监管物资不存在', code=404)
+
+        serializer = CustodyTransitionSerializer(data=request.data)
+        if not serializer.is_valid():
+            first_field = list(serializer.errors.keys())[0]
+            return error_response(message=str(serializer.errors[first_field][0]))
+
+        idem_key = serializer.validated_data.get('idempotency_key') or None
+        try:
+            goods, status_log, outbox, duplicate = change_custody_status(
+                goods,
+                to_status=serializer.validated_data['status'],
+                operator=request.user,
+                remark=serializer.validated_data.get('remark', ''),
+                recipients=serializer.validated_data.get('recipients'),
+                idempotency_key=idem_key,
+            )
+        except TransitionError as exc:
+            return error_response(message=str(exc))
+
+        return success_response(data={
+            'goods': CustodyGoodsSerializer(goods).data,
+            'log_id': status_log.id,
+            'outbox_id': outbox.id,
+            'dedup_key': custody_dedup_key(goods.id, status_log.id),
+            'duplicate': duplicate,
+        }, message='重复事件已忽略' if duplicate else '状态变更成功，通知已进入投递箱')
+
+
+class CustodyStatusLogListView(APIView):
+    """监管物资状态变化记录"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        logs = CustodyStatusLog.objects.filter(custody_goods_id=pk).order_by('-created_at')
+        data = [
+            {
+                'id': log.id,
+                'from_status': log.from_status,
+                'to_status': log.to_status,
+                'operator': log.operator.username if log.operator else '',
+                'remark': log.remark,
+                'idempotency_key': log.idempotency_key or '',
+                'created_at': log.created_at,
+            }
+            for log in logs
+        ]
+        return success_response(data={'list': data, 'total': len(data)})
+
+
+class NotificationOutboxListView(APIView):
+    """投递箱状态查询：可按状态/事件过滤，含每轮投递流水。"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        queryset = NotificationOutbox.objects.prefetch_related('deliveries').all()
+
+        status_filter = request.query_params.get('status')
+        if status_filter:
+            queryset = queryset.filter(status=status_filter)
+        event_type = request.query_params.get('event_type')
+        if event_type:
+            queryset = queryset.filter(event_type=event_type)
+        dedup_key = request.query_params.get('dedup_key')
+        if dedup_key:
+            queryset = queryset.filter(dedup_key=dedup_key)
+
+        queryset = queryset.order_by('-id')
+        page = int(request.query_params.get('page', 1))
+        page_size = int(request.query_params.get('page_size', 20))
+        start = (page - 1) * page_size
+        end = start + page_size
+
+        total = queryset.count()
+        items = queryset[start:end]
+        return success_response(data={
+            'list': NotificationOutboxSerializer(items, many=True).data,
+            'total': total,
+            'page': page,
+            'page_size': page_size,
+        })
+
+
+class NotificationOutboxDetailView(APIView):
+    """单条投递箱记录及完整投递流水"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        try:
+            outbox = NotificationOutbox.objects.prefetch_related('deliveries').get(pk=pk)
+        except NotificationOutbox.DoesNotExist:
+            return error_response(message='投递记录不存在', code=404)
+        return success_response(data=NotificationOutboxSerializer(outbox).data)

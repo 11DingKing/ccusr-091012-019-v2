@@ -62,6 +62,19 @@ JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_DELTA = timedelta(hours=24)
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
+
+# ==================== 通知投递箱 ====================
+# 进程内投递作业是否随应用启动（也可使用 manage.py process_notifications 显式运行）
+NOTIFICATION_WORKER_ENABLED = os.environ.get("NOTIFICATION_WORKER_ENABLED", "false").lower() == "true"
+NOTIFICATION_SENDER = os.environ.get(
+    "NOTIFICATION_SENDER", "apps.warehouse.notifications.senders.MockSender"
+)
+NOTIFICATION_BATCH_SIZE = int(os.environ.get("NOTIFICATION_BATCH_SIZE", "20"))
+NOTIFICATION_LEASE_SECONDS = int(os.environ.get("NOTIFICATION_LEASE_SECONDS", "60"))
+NOTIFICATION_MAX_ATTEMPTS = int(os.environ.get("NOTIFICATION_MAX_ATTEMPTS", "5"))
+NOTIFICATION_BACKOFF_BASE_SECONDS = int(os.environ.get("NOTIFICATION_BACKOFF_BASE_SECONDS", "30"))
+NOTIFICATION_BACKOFF_CAP_SECONDS = int(os.environ.get("NOTIFICATION_BACKOFF_CAP_SECONDS", "1800"))
+NOTIFICATION_WORKER_INTERVAL_SECONDS = int(os.environ.get("NOTIFICATION_WORKER_INTERVAL_SECONDS", "5"))
 LOGS_DIR = BASE_DIR / "logs"
 LOGS_DIR.mkdir(exist_ok=True)
 from apps.core.logging_config import setup_logging

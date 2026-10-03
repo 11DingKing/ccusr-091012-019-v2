@@ -62,6 +62,16 @@ JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_DELTA = timedelta(hours=24)
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
+
+# 通知投递箱（事务性发件箱 + 进程内作业）
+NOTIFICATION_BATCH_SIZE = int(os.environ.get("NOTIFICATION_BATCH_SIZE", 50))
+NOTIFICATION_LEASE_SECONDS = int(os.environ.get("NOTIFICATION_LEASE_SECONDS", 30))
+NOTIFICATION_MAX_ATTEMPTS = int(os.environ.get("NOTIFICATION_MAX_ATTEMPTS", 5))
+NOTIFICATION_BACKOFF_BASE_SECONDS = int(os.environ.get("NOTIFICATION_BACKOFF_BASE_SECONDS", 1))
+NOTIFICATION_BACKOFF_CAP_SECONDS = int(os.environ.get("NOTIFICATION_BACKOFF_CAP_SECONDS", 300))
+# 仅在业务服务进程（gunicorn/uvicorn/runserver）启动后台投递线程；可用环境变量强制开关。
+NOTIFICATION_WORKER_AUTOSTART = os.environ.get("NOTIFICATION_ENABLE_WORKER", "1") != "0"
+
 LOGS_DIR = BASE_DIR / "logs"
 LOGS_DIR.mkdir(exist_ok=True)
 from apps.core.logging_config import setup_logging

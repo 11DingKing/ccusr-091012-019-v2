@@ -2,7 +2,10 @@
 仓库管理序列化器
 """
 from rest_framework import serializers
-from .models import Unit, Category, Variety, Goods, StockIn, StockOut, Warning, Approval
+from .models import (
+    Unit, Category, Variety, Goods, StockIn, StockOut, Warning, Approval,
+    CustodyStatus, NotificationOutbox,
+)
 
 
 class UnitSerializer(serializers.ModelSerializer):
@@ -193,10 +196,41 @@ class ApprovalSerializer(serializers.ModelSerializer):
     """审批记录序列化器"""
     approver_name = serializers.CharField(source='approver.username', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
-    
+
     class Meta:
         model = Approval
         fields = [
             'id', 'stock_out', 'approver', 'approver_name',
             'status', 'status_display', 'remark', 'created_at', 'updated_at'
         ]
+
+
+class CustodyActionSerializer(serializers.Serializer):
+    """冻结 / 驳回 / 放行请求"""
+    action = serializers.ChoiceField(choices=CustodyStatus.ACTION_CHOICES, required=True)
+    reason = serializers.CharField(required=False, allow_blank=True, default='')
+    recipient = serializers.CharField(
+        required=False, allow_blank=True, max_length=200, default=''
+    )
+    event_id = serializers.CharField(
+        required=False, allow_blank=True, max_length=100, default=''
+    )
+
+
+class NotificationOutboxSerializer(serializers.ModelSerializer):
+    """通知投递状态（可查询验收）"""
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    event_label = serializers.SerializerMethodField()
+
+    class Meta:
+        model = NotificationOutbox
+        fields = [
+            'id', 'event_type', 'aggregate_ref', 'idempotency_key',
+            'recipient', 'channel', 'payload',
+            'status', 'status_display', 'attempts', 'max_attempts',
+            'available_at', 'claimed_by', 'claimed_at', 'lease_expires_at',
+            'last_error', 'sent_at', 'dead_at', 'created_at', 'event_label',
+        ]
+
+    def get_event_label(self, obj):
+        return dict(CustodyStatus.ACTION_CHOICES).get(obj.payload.get('action'), '')

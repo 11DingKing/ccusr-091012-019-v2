@@ -10,13 +10,18 @@ from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from apps.core.response import success_response, error_response
-from .models import Unit, Category, Variety, Goods, StockIn, StockOut, Warning, Approval
+from .models import (
+    Unit, Category, Variety, Goods, StockIn, StockOut, Warning, Approval,
+    NotificationOutbox,
+)
+from .custody import change_custody_status
 from .serializers import (
     UnitSerializer, UnitCreateSerializer,
     CategorySerializer, CategoryCreateSerializer,
     VarietySerializer, VarietyCreateSerializer,
     GoodsSerializer, StockInSerializer, StockOutSerializer,
-    WarningSerializer, ApprovalSerializer
+    WarningSerializer, ApprovalSerializer,
+    CustodyActionSerializer, NotificationOutboxSerializer,
 )
 
 logger = logging.getLogger('apps')
@@ -628,11 +633,119 @@ class WarningListView(APIView):
 class ApprovalListView(APIView):
     """审批记录列表视图"""
     permission_classes = [IsAuthenticated]
-    
+
     def get(self, request):
         return success_response(data={
             'list': [],
             'total': 0,
             'page': 1,
             'page_size': 10
+        })
+
+
+# ==================== 监管状态与通知投递 ====================
+
+class CustodyStatusActionView(APIView):
+    """冻结 / 驳回 / 放行：业务变更与通知投递箱同事务提交。"""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        try:
+            goods = Goods.objects.get(pk=pk)
+        except Goods.DoesNotExist:
+            return error_response(message='货物不存在', code=404)
+
+        serializer = CustodyActionSerializer(data=request.data)
+        if not serializer.is_valid():
+            first_error = list(serializer.errors.values())[0][0]
+            return error_response(message=str(first_error))
+
+        data = serializer.validated_data
+        try:
+            entry, outbox, created = change_custody_status(
+                goods,
+                data['action'],
+                operator=request.user,
+                reason=data.get('reason', ''),
+                recipient=data.get('recipient') or None,
+                event_id=data.get('event_id') or None,
+            )
+        except ValueError as exc:
+            return error_response(message=str(exc))
+
+        if not created:
+            return success_response(
+                data={
+                    'duplicated': True,
+                    'outbox': NotificationOutboxSerializer(outbox).data,
+                },
+                message='重复事件已忽略',
+            )
+
+        logger.info(
+            "User %s changed custody status goods=%s action=%s outbox=%s",
+            request.user.username, goods.id, data['action'], outbox.id,
+        )
+        return success_response(
+            data={
+                'duplicated': False,
+                'status_id': entry.id,
+                'outbox': NotificationOutboxSerializer(outbox).data,
+            },
+            message='状态变更成功，通知已进入投递箱',
+        )
+
+
+class NotificationOutboxListView(APIView):
+    """通知投递状态查询（验收可查：成功 / 重试 / 终败 / 租约）。"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        queryset = NotificationOutbox.objects.all().order_by('-id')
+
+        status = request.query_params.get('status')
+        if status:
+            queryset = queryset.filter(status=status)
+        event_type = request.query_params.get('event_type')
+        if event_type:
+            queryset = queryset.filter(event_type=event_type)
+        aggregate_ref = request.query_params.get('aggregate_ref')
+        if aggregate_ref:
+            queryset = queryset.filter(aggregate_ref=aggregate_ref)
+        idempotency_key = request.query_params.get('idempotency_key')
+        if idempotency_key:
+            queryset = queryset.filter(idempotency_key=idempotency_key)
+
+        try:
+            page = max(int(request.query_params.get('page', 1)), 1)
+            page_size = max(int(request.query_params.get('page_size', 10)), 1)
+        except (TypeError, ValueError):
+            page, page_size = 1, 10
+
+        total = queryset.count()
+        items = queryset[(page - 1) * page_size:page * page_size]
+        return success_response(data={
+            'list': NotificationOutboxSerializer(items, many=True).data,
+            'total': total,
+            'page': page,
+            'page_size': page_size,
+        })
+
+
+class NotificationOutboxDetailView(APIView):
+    """单条通知的投递状态与每次尝试记录。"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        try:
+            outbox = NotificationOutbox.objects.get(pk=pk)
+        except NotificationOutbox.DoesNotExist:
+            return error_response(message='通知记录不存在', code=404)
+
+        deliveries = outbox.deliveries.order_by('id').values(
+            'attempt_no', 'result', 'claimed_by', 'detail', 'created_at'
+        )
+        return success_response(data={
+            'outbox': NotificationOutboxSerializer(outbox).data,
+            'deliveries': list(deliveries),
         })

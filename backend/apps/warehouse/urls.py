@@ -8,7 +8,8 @@ from .views import (
     VarietyListView, VarietyDetailView, VarietyBatchDeleteView,
     VarietyTemplateView, VarietyImportView,
     DashboardView, GoodsListView, StockInListView, StockOutListView,
-    WarningListView, ApprovalListView
+    WarningListView, ApprovalListView,
+    CustodyStatusActionView, NotificationOutboxListView, NotificationOutboxDetailView,
 )
 
 urlpatterns = [
@@ -48,4 +49,17 @@ urlpatterns = [
     
     # 审批管理
     path('approvals/', ApprovalListView.as_view(), name='approval-list'),
+
+    # 监管状态变更（冻结 / 驳回 / 放行）
+    path(
+        'goods/<int:pk>/custody-status/',
+        CustodyStatusActionView.as_view(), name='goods-custody-status'
+    ),
+
+    # 通知投递箱查询
+    path('notifications/', NotificationOutboxListView.as_view(), name='notification-list'),
+    path(
+        'notifications/<int:pk>/',
+        NotificationOutboxDetailView.as_view(), name='notification-detail'
+    ),
 ]
